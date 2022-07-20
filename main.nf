@@ -2307,6 +2307,9 @@ process Mutect2 {
         set val("Mutect2"), idPatient, val("${idSampleTumor}_vs_${idSampleNormal}"), file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf") into mutect2PairOutput
         set idPatient, val("${idSampleTumor}_vs_${idSampleNormal}"), file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf.stats") optional true into intervalStatsFilesPair
         set idPatient, val("${idSampleTumor}_vs_${idSampleNormal}"), file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf.stats"), file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf") optional true into mutect2StatsPair
+        
+        
+        set idPatient, val("${idSampleTumor}_vs_${idSampleNormal}"), file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.f1r2.tar.gz"), file("${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf") optional true into mutect2F1R2StatsPair
 
     when: 'mutect2' in tools
 
@@ -2334,6 +2337,8 @@ process Mutect2 {
 mutect2PairOutput = mutect2PairOutput.groupTuple(by:[0,1,2])
 mutect2StatsPair = mutect2StatsPair.groupTuple(by:[0,1])
 
+mutect2F1R2StatsPair = mutect2F1R2StatsPair.groupTuple(by:[0,1])
+
 process Mutect2Single {
     tag "${idSampleTumor}-${intervalBed.baseName}"
 
@@ -2354,6 +2359,9 @@ process Mutect2Single {
         set val("Mutect2"), idPatient, idSampleTumor, file("${intervalBed.baseName}_${idSampleTumor}.vcf") into mutect2SingleOutput
         set idPatient, idSampleTumor, file("${intervalBed.baseName}_${idSampleTumor}.vcf.stats") optional true into intervalStatsFilesSingle
         set idPatient, idSampleTumor, file("${intervalBed.baseName}_${idSampleTumor}.vcf.stats"), file("${intervalBed.baseName}_${idSampleTumor}.vcf") optional true into mutect2StatsSingle
+        
+        
+        set idPatient, idSampleTumor, file("${intervalBed.baseName}_${idSampleTumor}.f1r2.tar.gz"), file("${intervalBed.baseName}_${idSampleTumor}.vcf") optional true into mutect2F1R2StatsSingle
 
     when: 'mutect2' in tools
 
@@ -2363,6 +2371,8 @@ process Mutect2Single {
     PON = params.pon ? "--panel-of-normals ${pon}" : ""
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
     softClippedOption = params.ignore_soft_clipped_bases ? "--dont-use-soft-clipped-bases true" : ""
+    def args = params.read_orientation_bias_model ? "--f1r2-tar-gz ${intervalBed.baseName}_${idSampleTumor}.f1r2.tar.gz" : ""
+    
     """
     # Get raw calls
     gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
@@ -2372,7 +2382,7 @@ process Mutect2Single {
       ${intervalsOptions} \
       ${softClippedOption} \
       --germline-resource ${germlineResource} \
-      ${PON} \
+      ${PON} $args \
       -O ${intervalBed.baseName}_${idSampleTumor}.vcf
     """
 }
@@ -2384,6 +2394,11 @@ mutect2StatsSingle = mutect2StatsSingle.groupTuple(by:[0,1])
 
 mutect2Stats = mutect2StatsSingle.mix(mutect2StatsPair)
 mutect2Stats = mutect2Stats.dump(tag:'Mutect2 Stats')
+
+
+mutect2StatsSingleF1R2 = mutect2F1R2StatsSingle.groupTuple(by:[0,1])
+f1r2Stats = mutect2StatsSingleF1R2.mix(mutect2F1R2StatsPair)
+f1r2Stats = f1r2Stats.dump(tag:'Mutect2 F1R2')
 
 process MergeMutect2Stats {
     tag "${idSample}"
@@ -2411,6 +2426,37 @@ process MergeMutect2Stats {
         MergeMutectStats \
         ${stats} \
         -O ${idSample}.vcf.gz.stats
+    """
+}
+
+
+// Added 07/20/2022 03:46:51 PM
+process LearnReadOrientationModel {
+    tag "${idSample}"
+
+    publishDir "${params.outdir}/VariantCalling/${idSample}/Mutect2", mode: params.publish_dir_mode
+
+    input:
+        set idPatient, idSample, file(f1r2Files), file(vcf) from f1r2Stats // Actual stats files and corresponding VCF chunks
+        file(dict) from ch_dict
+        file(fasta) from ch_fasta
+        file(fastaFai) from ch_fai
+        file(germlineResource) from ch_germline_resource
+        file(germlineResourceIndex) from ch_germline_resource_tbi
+        file(intervals) from ch_intervals
+
+    output:
+        set idPatient, idSample, file("${idSample}.read-orientation-model.tar.gz") into mergedReadOrientationFile
+
+    when: 'mutect2' in tools
+
+    script:
+        f1r2 = f1r2Files.collect{ "-I ${it} " }.join(' ')
+    """
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
+      LearnReadOrientationModel \
+      ${f1r2} \
+      -O ${idSample}.read-orientation-model.tar.gz
     """
 }
 
@@ -2593,7 +2639,8 @@ process CalculateContamination {
 mutect2CallsToFilter = vcfConcatenatedForFilter.map{
     variantCaller, idPatient, idSample, vcf, tbi ->
     [idPatient, idSample, vcf, tbi]
-}.join(mergedStatsFile, by:[0,1]).join(contaminationTable, by:[0,1])
+}.join(mergedStatsFile, by:[0,1]).join(mergedReadOrientationFile, by:[0,1]).join(contaminationTable, by:[0,1])
+
 
 process FilterMutect2Calls {
     label 'cpus_1'
@@ -2603,7 +2650,7 @@ process FilterMutect2Calls {
     publishDir "${params.outdir}/VariantCalling/${idSample}/Mutect2", mode: params.publish_dir_mode
 
     input:
-        set idPatient, idSample, file(unfiltered), file(unfilteredIndex), file(stats), file(contaminationTable) from mutect2CallsToFilter
+        set idPatient, idSample, file(unfiltered), file(unfilteredIndex), file(stats), file(F1R2File), file(contaminationTable) from mutect2CallsToFilter
         file(dict) from ch_dict
         file(fasta) from ch_fasta
         file(fastaFai) from ch_fai
@@ -2617,6 +2664,10 @@ process FilterMutect2Calls {
     when: 'mutect2' in tools
 
     script:
+    
+    def args = params.read_orientation_bias_model ? "--ob-priors ${F1R2File}" : ""
+    
+    
     """
     # do the actual filtering
     gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
@@ -2624,7 +2675,7 @@ process FilterMutect2Calls {
         -V ${unfiltered} \
         --contamination-table ${contaminationTable} \
         --stats ${stats} \
-        -R ${fasta} \
+        -R ${fasta} $args \
         -O Mutect2_filtered_${idSample}.vcf.gz
     """
 }
