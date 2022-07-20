@@ -1,5 +1,12 @@
 #!/usr/bin/env nextflow
 
+/* 
+
+  Changelog
+    06/09/2022 10:08:43 PM : remove toGiga and replace with added params.default_java_options
+*/
+
+
 /*
 ================================================================================
                                   nf-core/sarek
@@ -279,6 +286,7 @@ summary['MarkDuplicates'] = "Options"
 summary['Java options'] = params.markdup_java_options
 summary['GATK Spark']   = params.use_gatk_spark ? 'Yes' : 'No'
 
+
 summary['Save BAMs mapped']   = params.save_bam_mapped ? 'Yes' : 'No'
 summary['Skip MarkDuplicates']   = params.skip_markduplicates ? 'Yes' : 'No'
 
@@ -496,7 +504,7 @@ process BuildDict {
 
     script:
     """
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
         CreateSequenceDictionary \
         --REFERENCE ${fasta} \
         --OUTPUT ${fasta.baseName}.dict
@@ -774,7 +782,7 @@ else inputPairReadsTrimGalore.close()
 
 process FastQCFQ {
     label 'FastQC'
-    label 'cpus_2'
+    label 'cpus_4'
 
     tag "${idPatient}-${idRun}"
 
@@ -790,7 +798,7 @@ process FastQCFQ {
 
     script:
     """
-    fastqc -t 2 -q ${idSample}_${idRun}_R1.fastq.gz ${idSample}_${idRun}_R2.fastq.gz
+    fastqc -t ${task.cpus} -q ${idSample}_${idRun}_R1.fastq.gz ${idSample}_${idRun}_R2.fastq.gz
     """
 }
 
@@ -862,6 +870,7 @@ process TrimGalore {
          --cores ${cores} \
         --paired \
         --fastqc \
+        --fastqc_args "-t 4" \
         --gzip \
         ${c_r1} ${c_r2} \
         ${tpc_r1} ${tpc_r2} \
@@ -1053,7 +1062,7 @@ process MapReads {
     // adjust mismatch penalty for tumor samples
     status = statusMap[idPatient, idSample]
     extra = status == 1 ? "-B 3" : ""
-    convertToFastq = hasExtension(inputFile1, "bam") ? "gatk --java-options -Xmx${task.memory.toGiga()}g SamToFastq --INPUT=${inputFile1} --FASTQ=/dev/stdout --INTERLEAVE=true --NON_PF=true | \\" : ""
+    convertToFastq = hasExtension(inputFile1, "bam") ? "gatk --java-options -Xmx${params.default_java_xmx_gb}g SamToFastq --INPUT=${inputFile1} --FASTQ=/dev/stdout --INTERLEAVE=true --NON_PF=true | \\" : ""
     input = hasExtension(inputFile1, "bam") ? "-p /dev/stdin - 2> >(tee ${inputFile1}.bwa.stderr.log >&2)" : "${inputFile1} ${inputFile2}"
     aligner = params.aligner == "bwa-mem2" ? "bwa-mem2" : "bwa"
     """
@@ -1253,7 +1262,7 @@ process MarkDuplicates {
     when: !(params.skip_markduplicates)
 
     script:
-    markdup_java_options = task.memory.toGiga() > 8 ? params.markdup_java_options : "\"-Xms" +  (task.memory.toGiga() / 2).trunc() + "g -Xmx" + (task.memory.toGiga() - 1) + "g\""
+    markdup_java_options = params.markdup_java_options
     metrics = 'markduplicates' in skipQC ? '' : "-M ${idSample}.bam.metrics"
     if (params.use_gatk_spark)
     """
@@ -1402,7 +1411,7 @@ process BaseRecalibrator {
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
     // TODO: --use-original-qualities ???
     """
-    gatk --java-options -Xmx${task.memory.toGiga()}g \
+    gatk --java-options -Xmx${params.default_java_xmx_gb}g \
         BaseRecalibrator \
         -I ${bam} \
         -O ${prefix}${idSample}.recal.table \
@@ -1451,7 +1460,7 @@ process GatherBQSRReports {
     script:
     input = recal.collect{"-I ${it}"}.join(' ')
     """
-    gatk --java-options -Xmx${task.memory.toGiga()}g \
+    gatk --java-options -Xmx${params.default_java_xmx_gb}g \
         GatherBQSRReports \
         ${input} \
         -O ${idSample}.recal.table \
@@ -1543,7 +1552,7 @@ process ApplyBQSR {
     prefix = params.no_intervals ? "" : "${intervalBed.baseName}_"
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
     """
-    gatk --java-options -Xmx${task.memory.toGiga()}g \
+    gatk --java-options -Xmx${params.default_java_xmx_gb}g \
         ApplyBQSR \
         -R ${fasta} \
         --input ${bam} \
@@ -1790,7 +1799,7 @@ process BamQC {
     script:
     use_bed = params.target_bed ? "-gff ${targetBED}" : ''
     """
-    qualimap --java-mem-size=${task.memory.toGiga()}G \
+    qualimap --java-mem-size=${params.default_java_xmx_gb_qualimap}G \
         bamqc \
         -bam ${bam} \
         --paint-chromosome-limits \
@@ -1864,7 +1873,7 @@ process HaplotypeCaller {
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
     dbsnpOptions = params.dbsnp ? "--D ${dbsnp}" : ""
     """
-    gatk --java-options "-Xmx${task.memory.toGiga()}g -Xms6000m -XX:GCTimeLimit=50 -XX:GCHeapFreeLimit=10" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g -Xms6000m -XX:GCTimeLimit=50 -XX:GCHeapFreeLimit=10" \
         HaplotypeCaller \
         -R ${fasta} \
         -I ${bam} \
@@ -1903,11 +1912,11 @@ process GenotypeGVCFs {
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
     dbsnpOptions = params.dbsnp ? "--D ${dbsnp}" : ""
     """
-    gatk --java-options -Xmx${task.memory.toGiga()}g \
+    gatk --java-options -Xmx${params.default_java_xmx_gb}g \
         IndexFeatureFile \
         -I ${gvcf}
 
-    gatk --java-options -Xmx${task.memory.toGiga()}g \
+    gatk --java-options -Xmx${params.default_java_xmx_gb}g \
         GenotypeGVCFs \
         -R ${fasta} \
         ${intervalsOptions} \
@@ -2309,7 +2318,7 @@ process Mutect2 {
     softClippedOption = params.ignore_soft_clipped_bases ? "--dont-use-soft-clipped-bases true" : ""
     """
     # Get raw calls
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
       Mutect2 \
       -R ${fasta}\
       -I ${bamTumor} -tumor ${idSampleTumor} \
@@ -2356,7 +2365,7 @@ process Mutect2Single {
     softClippedOption = params.ignore_soft_clipped_bases ? "--dont-use-soft-clipped-bases true" : ""
     """
     # Get raw calls
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
       Mutect2 \
       -R ${fasta}\
       -I ${bamTumor}  -tumor ${idSampleTumor} \
@@ -2396,9 +2405,9 @@ process MergeMutect2Stats {
     when: 'mutect2' in tools
 
     script:
-               stats = statsFiles.collect{ "-stats ${it} " }.join(' ')
+        stats = statsFiles.collect{ "-stats ${it} " }.join(' ')
     """
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
         MergeMutectStats \
         ${stats} \
         -O ${idSample}.vcf.gz.stats
@@ -2511,7 +2520,7 @@ process PileupSummariesForMutect2 {
     script:
     intervalsOptions = params.no_intervals ? "" : "-L ${intervalBed}"
     """
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
         GetPileupSummaries \
         -I ${bamTumor} \
         -V ${germlineResource} \
@@ -2543,7 +2552,7 @@ process MergePileupSummaries {
     script:
     allPileups = pileupSums.collect{ "-I ${it} " }.join(' ')
     """
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
         GatherPileupSummaries \
         --sequence-dictionary ${dict} \
         ${allPileups} \
@@ -2568,10 +2577,10 @@ process CalculateContamination {
 
     when: 'mutect2' in tools
 
-    script:   
+    script:
     """
     # calculate contamination
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
         CalculateContamination \
         -I ${idSample}_pileupsummaries.table \
         -O ${idSample}_contamination.table
@@ -2610,7 +2619,7 @@ process FilterMutect2Calls {
     script:
     """
     # do the actual filtering
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" \
+    gatk --java-options "-Xmx${params.default_java_xmx_gb}g" \
         FilterMutectCalls \
         -V ${unfiltered} \
         --contamination-table ${contaminationTable} \
@@ -3621,7 +3630,7 @@ process Snpeff {
     reducedVCF = reduceVCF(vcf.fileName)
     cache = (params.snpeff_cache && params.annotation_cache) ? "-dataDir \${PWD}/${dataDir}" : ""
     """
-    snpEff -Xmx${task.memory.toGiga()}g \
+    snpEff -Xmx${params.default_java_xmx_gb}g \
         ${snpeffDb} \
         -csvStats ${reducedVCF}_snpEff.csv \
         -nodownload \
