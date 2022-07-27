@@ -2328,7 +2328,7 @@ process Mutect2 {
       -I ${bamNormal} -normal ${idSampleNormal} \
       ${intervalsOptions} \
       ${softClippedOption} \
-      --germline-resource ${germlineResource} \
+      --germline-resource ${germlineResource} ${params.mutect2_arg} \
       ${PON} \
       -O ${intervalBed.baseName}_${idSampleTumor}_vs_${idSampleNormal}.vcf
     """
